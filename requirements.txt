@@ -1,0 +1,3 @@
+function-stream==0.6.0rc2
+pydantic
+pytest>=7.0.0

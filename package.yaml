@@ -1,0 +1,42 @@
+apiVersion: fs.functionstream.github.io/v1alpha1
+kind: Package
+metadata:
+  name: current-time
+spec:
+  displayName: Get Current Time
+  logo: ""
+  description: "A function for getting the current time."
+  functionType:
+    cloud:
+      image: "functionstream/time-function:latest"
+  modules:
+    getCurrentTime:
+      displayName: Get Current Time
+      description: "A tool that returns the current time."
+      sourceSchema: |
+        {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "$id": "https://example.com/schemas/user.schema.json",
+          "title": "User",
+          "description": "Schema definition for a User object. Represents a user entity within the system.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The full name of the user.\n- Required field.\n- Data type: string.\n- This field is used for displaying, searching, and identifying a user.\n- Example values: \"Alice\", \"John Doe\"."
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "additionalProperties": false
+        }
+      sinkSchema: |
+        result: result: A greeting to the user followed by the current time.
+      config:
+        format:
+          displayName: "Time format"
+          description: "The format for displaying the time (e.g., 'HH:MM:SS', 'YYYY-MM-DD HH:MM:SS')"
+          type: "string"
+          required: true
+
