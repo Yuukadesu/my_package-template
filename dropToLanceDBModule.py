@@ -34,7 +34,7 @@ DEFAULT_CONFIG = StreamConfig()
 
 class PulsarToLanceDBModule(FSModule):
     """
-    FSModule: 将 Pulsar 消息导入到 LanceDB
+    FSModule: Import Pulsar messages into LanceDB
     """
     def __init__(self, config: Optional[StreamConfig] = None):
         self._consumer = None
@@ -78,7 +78,7 @@ class PulsarToLanceDBModule(FSModule):
         return {"status": "processed", "topic": topic_name}
 
     async def close(self):
-        """关闭 Module，清理所有 Stream"""
+        """Close the module and clean up all streams"""
         streams = list(self.topic_to_stream.values())
         for s in streams:
             await s.close()
@@ -111,7 +111,7 @@ class _Stream:
                 if await self._should_time_flush():
                     await self.flush()
             except Exception as e:
-                logger.error(f"[{self.table_name}] 定时flush检查失败: {e}", exc_info=True)
+                logger.error(f"[{self.table_name}] Scheduled flush check failed: {e}", exc_info=True)
 
     async def _should_time_flush(self) -> bool:
         async with self.lock:
@@ -134,7 +134,7 @@ class _Stream:
             else:
                 doc = json.loads(str(msg_data))
         except Exception as e:
-            logger.error(f"❌ JSON 解析失败 [{self.table_name}]: {e}, msg_id: {msg.message_id()}")
+            logger.error(f"JSON parsing failed[{self.table_name}]: {e}, msg_id: {msg.message_id()}")
             return
 
         data_size = _calculate_doc_size(doc)
@@ -162,7 +162,7 @@ class _Stream:
         if table_exists:
             logger.info(f"[{table_name}] table is already exists.")
         else:
-            logger.info(f"✅ [{table_name}] table had been created，include {len(docs)} data")
+            logger.info(f"[{table_name}] table had been created，include {len(docs)} data")
         
         return self._table
     
@@ -175,7 +175,7 @@ class _Stream:
             if not self.pending_msgs:
                 return
             if len(self.pending_msgs) != len(self.pending_docs):
-                logger.error(f"⚠️ [{self.table_name}] 数据不同步: msgs={len(self.pending_msgs)}, docs={len(self.pending_docs)}")
+                logger.error(f"[{self.table_name}] Data asynchronous: msgs={len(self.pending_msgs)}, docs={len(self.pending_docs)}")
                 min_len = min(len(self.pending_msgs), len(self.pending_docs))
                 msgs = list(self.pending_msgs[:min_len])
                 docs = list(self.pending_docs[:min_len])
@@ -204,14 +204,14 @@ class _Stream:
                     self.consumer.acknowledge(msg)
                 except Exception as e:
                     ack_failed_count += 1
-                    logger.warning(f"⚠️ [{self.table_name}] ack失败: {e}, msg_id: {msg.message_id()}")
+                    logger.warning(f"[{self.table_name}] ack failed: {e}, msg_id: {msg.message_id()}")
 
             if ack_failed_count > 0:
-                logger.error(f"⚠️ [{self.table_name}] 写入 {msg_count} 条，但 {ack_failed_count} 条ack失败，可能导致重复处理")
+                logger.error(f"[{self.table_name}] write {msg_count} messages，but {ack_failed_count} messages ack failed，May lead to duplicate processing")
             else:
-                logger.info(f"✅ [{self.table_name}] 写入 {msg_count} 条，已ack")
+                logger.info(f"[{self.table_name}] write {msg_count} messages，already ack")
         except Exception as e:
-            logger.error(f"❌ [{self.table_name}] 写入失败: {e}", exc_info=True)
+            logger.error(f"[{self.table_name}] write failed: {e}", exc_info=True)
             async with self.lock:
                 self.pending_msgs = msgs + self.pending_msgs
                 self.pending_docs = docs + self.pending_docs
