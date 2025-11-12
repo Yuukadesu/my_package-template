@@ -1,6 +1,9 @@
 import json
+import os
+import tempfile
 from unittest.mock import Mock, patch
 
+import lancedb
 import pulsar
 import pytest
 
@@ -177,3 +180,68 @@ class TestPulsarToLanceDBModule:
                     assert mock_consumer.acknowledge.call_count >= len(topic1_data) + len(topic2_data)
         finally:
             await module.close()
+
+    @pytest.mark.asyncio
+    async def test_verify_data_written_to_lancedb(self, module, context, mock_consumer, isinstance_patch):
+        """测试验证数据是否真正写入lancedb数据库"""
+        # 创建临时数据库目录
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "test-lancedb")
+            test_db = lancedb.connect(db_path)
+            
+            topic = "test_topic"
+            test_data = [
+                {"id": 1, "name": "test1", "value": "value1"},
+                {"id": 2, "name": "test2", "value": "value2"},
+                {"id": 3, "name": "test3", "value": "value3"},
+            ]
+            
+            try:
+                with isinstance_patch:
+                    with patch('dropToLanceDBModule._db', test_db):
+                        # 处理消息
+                        for data in test_data:
+                            msg = MockPulsarMessage(
+                                topic_name=topic,
+                                data=json.dumps(data).encode('utf-8'),
+                                message_id=f"msg-{data['id']}"
+                            )
+                            result = await module.process(context, {"message": msg})
+                            assert result == {"status": "processed", "topic": topic}
+                        
+                        # 刷新流以确保数据写入
+                        if topic in module.topic_to_stream:
+                            stream = module.topic_to_stream[topic]
+                            await stream.flush()
+                        
+                        # 使用lancedb接口查询数据验证是否真正写入
+                        table_name = topic  # topic_to_table_name会返回topic本身
+                        assert table_name in test_db.table_names(), f"表 {table_name} 应该存在"
+                        
+                        table = test_db.open_table(table_name)
+                        
+                        # 使用lancedb接口查询所有数据
+                        # 尝试使用to_pandas()，如果不存在则使用to_arrow().to_pandas()
+                        if hasattr(table, 'to_pandas'):
+                            df = table.to_pandas()
+                        else:
+                            arrow_table = table.to_arrow()
+                            df = arrow_table.to_pandas()
+                        
+                        # 验证数据是否写入
+                        assert len(df) == len(test_data), f"应该写入 {len(test_data)} 条数据，实际写入 {len(df)} 条"
+                        
+                        # 验证每条数据的内容
+                        for expected_data in test_data:
+                            # 查找匹配的记录
+                            matching_rows = df[df['id'] == expected_data['id']]
+                            assert len(matching_rows) > 0, f"未找到 id={expected_data['id']} 的数据"
+                            
+                            row = matching_rows.iloc[0]
+                            assert row['name'] == expected_data['name'], f"name字段不匹配: 期望 {expected_data['name']}, 实际 {row['name']}"
+                            assert row['value'] == expected_data['value'], f"value字段不匹配: 期望 {expected_data['value']}, 实际 {row['value']}"
+                        
+                        # 验证acknowledge被调用
+                        assert mock_consumer.acknowledge.call_count >= len(test_data)
+            finally:
+                await module.close()

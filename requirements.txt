@@ -1,5 +1,6 @@
 function-stream==0.6.0rc2
 pydantic~=2.12.3
 pytest>=7.0.0
+pandas>=1.0.0
 
 lancedb~=0.25.2

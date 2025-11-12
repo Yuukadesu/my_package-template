@@ -100,6 +100,7 @@ class _Stream:
         self._flush_task: Optional[asyncio.Task] = None
         self._timer_started = False
         self._table = None
+        self._table_created_with_data = False  # 标记表是否是用数据创建的
 
     async def _timer_loop(self):
         check_interval = self.config.timer_check_interval
@@ -157,14 +158,21 @@ class _Stream:
 
         table_name = self.table_name
         table_exists = table_name in _db.table_names()
-        self._table = create_or_open_table(self.topic_name, docs)
         
         if table_exists:
+            self._table = _db.open_table(table_name)
             logger.info(f"[{table_name}] table is already exists.")
+            return self._table
         else:
-            logger.info(f"[{table_name}] table had been created，include {len(docs)} data")
-        
-        return self._table
+            # 创建表时传入所有数据，因为 create_table 会写入这些数据
+            # 返回一个标记，表示表是新创建的，flush 时不需要再次 add
+            if docs and len(docs) > 0:
+                self._table = _db.create_table(table_name, docs)
+                logger.info(f"[{table_name}] table had been created，include {len(docs)} data")
+                self._table_created_with_data = True  # 标记表是用数据创建的
+                return self._table
+            else:
+                raise ValueError(f"can not create table [{table_name}] without data")
     
     @property
     def table(self):
@@ -192,11 +200,22 @@ class _Stream:
 
         if not msgs or not docs:
             return
+        
+        # 检查表是否已存在
+        table_existed_before = self.table_name in _db.table_names()
         table = self._get_or_create_table(docs)
-
+        
+        # 如果表是新创建的，数据已经在 create_table 时写入了，不需要再次 add
+        # 如果表已存在，需要通过 add 追加数据
+        need_add = table_existed_before
+        
         loop = asyncio.get_running_loop()
         try:
-            await loop.run_in_executor(None, table.add, docs)
+            if need_add:
+                await loop.run_in_executor(None, table.add, docs)
+            else:
+                # 表是新创建的，数据已经在 create_table 时写入，重置标记
+                self._table_created_with_data = False
 
             ack_failed_count = 0
             for msg in msgs:
