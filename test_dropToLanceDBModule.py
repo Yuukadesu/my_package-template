@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import tempfile
@@ -43,27 +44,36 @@ class TestPulsarToLanceDBModule:
 
     @pytest.fixture
     def mock_db(self):
+        from unittest.mock import AsyncMock
+        
         db = Mock()
-        db.table_names = Mock(return_value=[])
+        # 异步版本的table_names
+        async def async_table_names():
+            return []
+        db.table_names = AsyncMock(return_value=[])
         
         table_mocks = {}
         
-        def create_table_side_effect(table_name, data):
+        # 异步版本的create_table
+        async def async_create_table_side_effect(table_name, data):
             if table_name not in table_mocks:
                 table = Mock()
-                table.add = Mock()
+                # 异步版本的add
+                table.add = AsyncMock()
                 table_mocks[table_name] = table
             return table_mocks[table_name]
         
-        def open_table_side_effect(table_name):
+        # 异步版本的open_table
+        async def async_open_table_side_effect(table_name):
             if table_name not in table_mocks:
                 table = Mock()
-                table.add = Mock()
+                # 异步版本的add
+                table.add = AsyncMock()
                 table_mocks[table_name] = table
             return table_mocks[table_name]
         
-        db.create_table.side_effect = create_table_side_effect
-        db.open_table.side_effect = open_table_side_effect
+        db.create_table = AsyncMock(side_effect=async_create_table_side_effect)
+        db.open_table = AsyncMock(side_effect=async_open_table_side_effect)
         db._table_mocks = table_mocks
         
         return db
@@ -187,7 +197,7 @@ class TestPulsarToLanceDBModule:
         # 创建临时数据库目录
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = os.path.join(temp_dir, "test-lancedb")
-            test_db = lancedb.connect(db_path)
+            test_db = await lancedb.connect_async(db_path)
             
             topic = "test_topic"
             test_data = [
@@ -216,17 +226,25 @@ class TestPulsarToLanceDBModule:
                         
                         # 使用lancedb接口查询数据验证是否真正写入
                         table_name = topic  # topic_to_table_name会返回topic本身
-                        assert table_name in test_db.table_names(), f"表 {table_name} 应该存在"
+                        table_names = await test_db.table_names()
+                        assert table_name in table_names, f"表 {table_name} 应该存在"
                         
-                        table = test_db.open_table(table_name)
+                        table = await test_db.open_table(table_name)
                         
                         # 使用lancedb接口查询所有数据
                         # 尝试使用to_pandas()，如果不存在则使用to_arrow().to_pandas()
                         if hasattr(table, 'to_pandas'):
-                            df = table.to_pandas()
+                            # 检查是否是异步方法
+                            if asyncio.iscoroutinefunction(table.to_pandas):
+                                df = await table.to_pandas()
+                            else:
+                                df = table.to_pandas()
                         else:
-                            arrow_table = table.to_arrow()
-                            df = arrow_table.to_pandas()
+                            if hasattr(table, 'to_arrow'):
+                                arrow_table = await table.to_arrow() if asyncio.iscoroutinefunction(table.to_arrow) else table.to_arrow()
+                                df = arrow_table.to_pandas()
+                            else:
+                                raise ValueError("Table does not support to_pandas or to_arrow")
                         
                         # 验证数据是否写入
                         assert len(df) == len(test_data), f"应该写入 {len(test_data)} 条数据，实际写入 {len(df)} 条"

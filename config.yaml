@@ -19,27 +19,30 @@ pulsar:
   authPlugin: ""  # Optional: Authentication plugin class name
   authParams: ""  # Optional: Authentication parameters
 
-module: "getCurrentTime"  # Required: Name of the module to use for processing
+module: "pulsarToLanceDB"  # Required: Name of the module to use for processing
 
 # Optional: List of source topics to consume from
 # Note: Either sources or requestSource must be specified
 sources:
   - pulsar:  # SourceSpec structure with pulsar configuration
-      topic: "get-current-time-source"  # Topic name for regular message consumption
+      topic: "test-lancedb-topic"  # Topic name for regular message consumption
 
 # Optional: request source
 requestSource:
   pulsar:  # SourceSpec structure with pulsar configuration
-    topic: "get-current-time-request"  # Topic name for request messages
+    topic: "test-lancedb-topic"  # Topic name for request messages
 
 # Required: Name of the subscription for the consumer
-subscriptionName: "test-sub"
+subscriptionName: "lancedb-sub"
 
 # Optional: Output sink configuration
 sink:
   pulsar:  # SinkSpec structure with pulsar configuration
-    topic: "get-current-time-sink"  # Topic name for output messages
+    topic: "test-lancedb-topic"  # Topic name for output messages
 
 # Optional: Additional configuration parameters
 config:
-  format: "%Y-%m-%d %H:%M:%S %Z%z"
+  flush_interval_seconds: 30
+  flush_max_payload_bytes: 104857600  # 100MB
+  flush_max_msg_count: 10000
+  timer_check_interval: 5
