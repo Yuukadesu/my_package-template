@@ -42,7 +42,7 @@ sink:
 
 # Optional: Additional configuration parameters
 config:
-  flush_interval_seconds: 30
-  flush_max_payload_bytes: 104857600  # 100MB
-  flush_max_msg_count: 10000
-  timer_check_interval: 5
+  flush_interval_seconds: 30  # 30秒flush一次，累积更大的批量
+  flush_max_payload_bytes: 104857600  # 100MB就flush，最大化批量以提高吞吐量
+  flush_max_msg_count: 10000  # 10000条消息就flush
+  timer_check_interval: 2  # 2秒检查一次，减少检查开销

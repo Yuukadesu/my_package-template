@@ -1,47 +1,78 @@
+import argparse
+import json
 import time
 import threading
-from typing import Dict, Any, List
+from typing import Optional
+from dataclasses import dataclass
 
 import pulsar
 
 
+@dataclass
+class ProducerConfig:
+    """Producer 配置类"""
+    service_url: str = "pulsar://127.0.0.1:6650"
+    topic: str = "test-lancedb-topic"
+    num_producers: int = 10
+    num_threads: int = 20
+    batch_size: int = 10000
+    message_size: int = 100  # 消息大小（字节），用于生成测试数据
+    report_interval: int = 50000  # 报告间隔（消息数）
+    report_time_interval: float = 1.0  # 报告时间间隔（秒）
+
+
 class Producer:
+    """Pulsar Producer 封装类"""
     
-    def __init__(self, service_url: str, topic: str, num_producers: int = 10, batch_size: int = 10000):
-        self.service_url = service_url
-        self.topic = topic
-        self.num_producers = num_producers
-        self.batch_size = batch_size
+    def __init__(self, config: ProducerConfig):
+        self.config = config
         self.producers = []
         self.clients = []
         self.message_count = 0
+        self.bytes_sent = 0
         self._count_lock = threading.Lock()
         self._running = True
-        
+        self._init_producers()
+    
     def _init_producers(self):
-        for i in range(self.num_producers):
+        """初始化多个 Producer 实例"""
+        print(f"正在创建 {self.config.num_producers} 个 Producer 实例...")
+        for i in range(self.config.num_producers):
             try:
-                client = pulsar.Client(self.service_url)
+                client = pulsar.Client(self.config.service_url)
                 try:
                     producer = client.create_producer(
-                        self.topic,
+                        self.config.topic,
                         batching_enabled=True,
-                        batching_max_messages=self.batch_size,
+                        batching_max_messages=self.config.batch_size,
                         batching_max_publish_delay_ms=1,
                         max_pending_messages=100000
                     )
                 except TypeError:
-                    producer = client.create_producer(self.topic)
+                    # 兼容旧版本 API
+                    producer = client.create_producer(self.config.topic)
                 
                 self.clients.append(client)
                 self.producers.append(producer)
             except Exception as e:
-                print(f"Failed to create producer {i}: {e}")
+                print(f"警告: 创建 Producer {i} 失败: {e}")
         
-        print(f"已创建 {len(self.producers)} 个Producer实例")
+        if not self.producers:
+            raise RuntimeError("无法创建任何 Producer 实例，请检查 Pulsar 服务是否运行")
+        
+        print(f"✓ 成功创建 {len(self.producers)} 个 Producer 实例\n")
     
-    def send_sync(self, message_bytes: bytes, producer_idx: int = None):
-        """同步发送消息（最快的方式）"""
+    def send_message(self, message_bytes: bytes, producer_idx: Optional[int] = None):
+        """
+        发送消息
+        
+        Args:
+            message_bytes: 消息字节数据
+            producer_idx: 指定使用的 producer 索引，如果为 None 则自动选择
+        """
+        if not self._running:
+            return False
+        
         if producer_idx is None:
             producer_idx = hash(message_bytes) % len(self.producers)
         
@@ -49,138 +80,272 @@ class Producer:
             self.producers[producer_idx].send(message_bytes)
             with self._count_lock:
                 self.message_count += 1
+                self.bytes_sent += len(message_bytes)
+            return True
         except Exception:
-            pass  # 忽略发送错误，继续发送
+            return False
+    
+    def get_stats(self):
+        """获取发送统计信息"""
+        with self._count_lock:
+            return {
+                "message_count": self.message_count,
+                "bytes_sent": self.bytes_sent,
+                "mb_sent": self.bytes_sent / (1024 * 1024)
+            }
     
     def close(self):
-        """关闭所有producer和client"""
+        """关闭所有 Producer 和 Client"""
         self._running = False
+        print("\n正在关闭 Producer...")
+        
         for producer in self.producers:
             try:
                 producer.close()
-            except:
+            except Exception:
                 pass
+        
         for client in self.clients:
             try:
                 client.close()
-            except:
+            except Exception:
                 pass
-    
+        
+        print("✓ Producer 已关闭")
 
 
-def send_messages_ultra_fast(
-    service_url: str = "pulsar://127.0.0.1:6650",
-    topic: str = "test-lancedb-topic",
-    num_producers: int = 10,
-    batch_size: int = 10000,
-    num_threads: int = 20,
-    report_interval: int = 100000
-):
+def generate_test_message(message_id: int, message_size: int) -> bytes:
     """
-    超高速发送消息到Pulsar topic（百万级速率）
+    生成测试消息
     
     Args:
-        service_url: Pulsar服务URL
-        topic: 目标topic名称
-        num_producers: Producer实例数量（多连接）
-        batch_size: 批量大小
-        num_threads: 发送线程数
-        report_interval: 报告间隔（消息数）
+        message_id: 消息 ID
+        message_size: 目标消息大小（字节）
+    
+    Returns:
+        消息字节数据
     """
-    producer = Producer(service_url, topic, num_producers, batch_size)
+    # 基础消息结构
+    base_msg = {
+        "id": message_id,
+        "timestamp": int(time.time() * 1000),
+        "value": message_id * 10
+    }
+    
+    # 如果消息太小，添加填充数据
+    base_json = json.dumps(base_msg).encode('utf-8')
+    if len(base_json) < message_size:
+        padding_size = message_size - len(base_json) - 20  # 预留一些空间
+        if padding_size > 0:
+            base_msg["data"] = "x" * padding_size
+    
+    return json.dumps(base_msg).encode('utf-8')
+
+
+def send_worker(producer: Producer, thread_id: int, config: ProducerConfig):
+    """发送消息的工作线程"""
+    local_counter = thread_id * 1000000  # 每个线程有自己的起始 ID
+    
+    while producer._running:
+        local_counter += 1
+        message_bytes = generate_test_message(local_counter, config.message_size)
+        producer.send_message(message_bytes, local_counter % len(producer.producers))
+
+
+def run_producer(config: ProducerConfig):
+    """运行 Producer 发送消息"""
+    producer = Producer(config)
     
     try:
-        # 在主线程初始化producers
-        producer._init_producers()
-        
-        if not producer.producers:
-            print("错误：无法创建任何producer")
-            return
-        
-        print(f"开始超高速压力测试，topic: {topic}")
-        print(f"Producer数量: {num_producers}, 线程数: {num_threads}, 批量大小: {batch_size}")
-        print("按 Ctrl+C 停止发送...\n")
+        print("=" * 60)
+        print("Pulsar Producer 压力测试")
+        print("=" * 60)
+        print(f"Service URL: {config.service_url}")
+        print(f"Topic: {config.topic}")
+        print(f"Producer 数量: {config.num_producers}")
+        print(f"线程数: {config.num_threads}")
+        print(f"批量大小: {config.batch_size}")
+        print(f"消息大小: ~{config.message_size} 字节")
+        print("=" * 60)
+        print("\n开始发送消息...")
+        print("按 Ctrl+C 停止发送\n")
         
         start_time = time.time()
-        message_id_counter = [0]
-        message_id_lock = threading.Lock()
         last_report_time = start_time
         last_report_count = 0
+        last_report_bytes = 0
         
-        # 使用线程池进行并发发送
-        def send_worker(thread_id):
-            local_counter = thread_id * 1000000  # 每个线程有自己的起始ID
-            while producer._running:
-
-                local_counter += 1
-                msg_id = local_counter
-
-                msg = f'{{"id":{msg_id},"v":{msg_id*10}}}'.encode('utf-8')
-
-                producer.send_sync(msg, msg_id % len(producer.producers))
-                
-                # 定期更新全局计数器（减少锁竞争）
-                if local_counter % 1000 == 0:
-                    with message_id_lock:
-                        if local_counter > message_id_counter[0]:
-                            message_id_counter[0] = local_counter
-        
-        # 启动多个发送线程
+        # 启动工作线程
         threads = []
-        for i in range(num_threads):
-            t = threading.Thread(target=send_worker, args=(i,), daemon=True)
-            t.start()
-            threads.append(t)
+        for i in range(config.num_threads):
+            thread = threading.Thread(
+                target=send_worker,
+                args=(producer, i, config),
+                daemon=True
+            )
+            thread.start()
+            threads.append(thread)
         
         # 主线程负责报告
         try:
             while True:
-                time.sleep(0.5)  # 每0.5秒检查一次，更及时的报告
-                current_time = time.time()
-                current_count = producer.message_count
+                time.sleep(config.report_time_interval)
                 
-                # 定期报告（每达到报告间隔时，或每秒报告一次）
+                current_time = time.time()
+                stats = producer.get_stats()
+                current_count = stats["message_count"]
+                current_bytes = stats["bytes_sent"]
+                
+                # 计算速率
                 elapsed = current_time - last_report_time
-                if current_count >= last_report_count + report_interval or elapsed >= 1.0:
+                if elapsed > 0:
                     count_diff = current_count - last_report_count
-                    instant_rate = count_diff / elapsed if elapsed > 0 else 0
+                    bytes_diff = current_bytes - last_report_bytes
+                    
+                    instant_msg_rate = count_diff / elapsed
+                    instant_mbps = (bytes_diff / (1024 * 1024)) / elapsed
+                    
                     total_elapsed = current_time - start_time
-                    avg_rate = current_count / total_elapsed if total_elapsed > 0 else 0
-                    print(f"[Producer] [{total_elapsed:.1f}s] 已发送: {current_count:,} 条 | "
-                          f"瞬时速率: {instant_rate:,.0f} 消息/秒 | "
-                          f"平均速率: {avg_rate:,.0f} 消息/秒")
+                    avg_msg_rate = current_count / total_elapsed if total_elapsed > 0 else 0
+                    avg_mbps = (current_bytes / (1024 * 1024)) / total_elapsed if total_elapsed > 0 else 0
+                    
+                    # 输出报告
+                    print(
+                        f"[Producer] [{total_elapsed:.1f}s] "
+                        f"已发送: {current_count:,} 条 | "
+                        f"{stats['mb_sent']:.2f} MB | "
+                        f"瞬时: {instant_msg_rate:,.0f} msg/s, {instant_mbps:.2f} MB/s | "
+                        f"平均: {avg_msg_rate:,.0f} msg/s, {avg_mbps:.2f} MB/s"
+                    )
+                    
                     last_report_time = current_time
                     last_report_count = current_count
+                    last_report_bytes = current_bytes
+                
         except KeyboardInterrupt:
             print("\n收到停止信号，正在关闭...")
+        
         finally:
             producer.close()
+            
+            # 最终统计
             total_time = time.time() - start_time
-            print(f"\n总计发送 {producer.message_count:,} 条消息，耗时 {total_time:.2f} 秒")
+            final_stats = producer.get_stats()
+            
+            print("\n" + "=" * 60)
+            print("最终统计")
+            print("=" * 60)
+            print(f"总发送消息数: {final_stats['message_count']:,} 条")
+            print(f"总发送数据量: {final_stats['mb_sent']:.2f} MB")
+            print(f"总耗时: {total_time:.2f} 秒")
             if total_time > 0:
-                print(f"平均速率: {producer.message_count / total_time:,.0f} 消息/秒")
+                print(f"平均速率: {final_stats['message_count'] / total_time:,.0f} 消息/秒")
+                print(f"平均吞吐量: {final_stats['mb_sent'] / total_time:.2f} MB/s")
+            print("=" * 60)
     
     except Exception as e:
-        print(f"发送消息时出错: {e}")
+        print(f"\n错误: {e}")
         import traceback
         traceback.print_exc()
         producer.close()
+        raise
 
 
 def main():
-    send_messages_ultra_fast(
-        service_url="pulsar://127.0.0.1:6650",
-        topic="test-lancedb-topic",
-        num_producers=20,          # 多个producer实例，多连接
-        batch_size=10000,          # 大批量
-        num_threads=50,            # 多线程并发发送
-        report_interval=100000     # 每10万条报告一次
+    """主函数，支持命令行参数"""
+    parser = argparse.ArgumentParser(
+        description="Pulsar Producer 压力测试工具",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 使用默认配置
+  python3 producer.py
+  
+  # 自定义配置
+  python3 producer.py --topic my-topic --producers 20 --threads 50
+  
+  # 发送大消息测试
+  python3 producer.py --message-size 1024 --threads 10
+        """
     )
+    
+    parser.add_argument(
+        "--service-url",
+        type=str,
+        default="pulsar://127.0.0.1:6650",
+        help="Pulsar 服务 URL (默认: pulsar://127.0.0.1:6650)"
+    )
+    
+    parser.add_argument(
+        "--topic",
+        type=str,
+        default="test-lancedb-topic",
+        help="Topic 名称 (默认: test-lancedb-topic)"
+    )
+    
+    parser.add_argument(
+        "--producers",
+        type=int,
+        default=10,
+        help="Producer 实例数量 (默认: 10)"
+    )
+    
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=20,
+        help="发送线程数 (默认: 20)"
+    )
+    
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=10000,
+        help="批量大小 (默认: 10000)"
+    )
+    
+    parser.add_argument(
+        "--message-size",
+        type=int,
+        default=100,
+        help="消息大小（字节）(默认: 100)"
+    )
+    
+    parser.add_argument(
+        "--report-interval",
+        type=int,
+        default=50000,
+        help="报告间隔（消息数）(默认: 50000)"
+    )
+    
+    parser.add_argument(
+        "--report-time",
+        type=float,
+        default=1.0,
+        help="报告时间间隔（秒）(默认: 1.0)"
+    )
+    
+    args = parser.parse_args()
+    
+    config = ProducerConfig(
+        service_url=args.service_url,
+        topic=args.topic,
+        num_producers=args.producers,
+        num_threads=args.threads,
+        batch_size=args.batch_size,
+        message_size=args.message_size,
+        report_interval=args.report_interval,
+        report_time_interval=args.report_time
+    )
+    
+    try:
+        run_producer(config)
+    except KeyboardInterrupt:
+        print("\nProducer 已停止")
+    except Exception as e:
+        print(f"\n发生错误: {e}")
+        exit(1)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nProducer已停止")
-
+    main()
